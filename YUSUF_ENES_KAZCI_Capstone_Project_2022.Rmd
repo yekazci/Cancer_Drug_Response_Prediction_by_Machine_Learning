@@ -1,0 +1,1605 @@
+---
+title: "Computational Genomics Course \n MDC/BIMSB - 2022 - Capstone Project - Exercises"
+author: "YUSUF ENES KAZCI"
+output:
+  word_document:
+    toc: yes
+    toc_depth: '2'
+  html_document:
+    toc: yes
+    toc_depth: 2
+    toc_float: yes
+    number_sections: yes
+    code_folding: hide
+    theme: readable
+    highlight: tango
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+---
+
+`r date()`
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+# Coding
+
+## Import and explore datasets
+
+In any data analysis project, it is highly recommended to first do exploratory data analysis to familiarize yourself with the data you are analyzing. It helps you understand the contents of the datasets such as the features, samples, overall distribution of different measurements (such as drug response values).
+
+This section is freestyle. Spend as much time as you see fit to get an understanding of the datasets.
+
+```{r}
+
+### loading required packages:
+
+library(tidyverse)
+
+### importing .RDS file containing our datasets:
+
+dat <- readRDS("../data.RDS")
+
+### Exploring data:
+
+GDSC <- dat$GDSC
+
+GDSC$gex %>% .[,1:5] %>% head
+
+### In gene expression matrix: features (genes) are in rows and samples 
+### (names of the cell lines) are stored in the columns.
+
+### Check the dimensions:
+
+GDSC$gex %>% dim
+
+### we have 19284 features for the 420 cell lines.
+
+### Check if any missing (NA) values in features:
+
+GDSC$gex %>% anyNA()
+
+### we do not have any missing value to deal with.
+
+### I will view the distribution of all the features across a select number of
+### samples.
+
+GDSC$gex[,c(1:50)] %>% boxplot(main = "Gene expression distributions across the 
+                               ### cell lines (samples) of the GDSC dataset")
+
+### Feature distribution across the samples are similar beacuse the data is
+### pre-scales and normalized.
+
+### Similar data exploration for the CNV data:
+
+GDSC$cnv %>% .[,1:5] %>% head
+
+### it has features in the rows and samples in the columns.
+
+### Dimension check:
+
+GDSC$cnv %>% dim()
+
+### It has 16799 features (genes) for 420 cell lines (samples).
+
+### Check if any missing values:
+
+GDSC$cnv %>% anyNA()
+
+### Not any missing values.
+
+### Look at the distributions of features across samples:
+
+GDSC$cnv[,c(1:100)] %>% boxplot(main = "Copy number variation distriutions 
+                                ### across the cell lines (samples) of 
+                                ### the GDSC dataset")
+
+### They look consistent across the samples, again pre-scaled and normalized.
+
+### Exploring drug dataset:
+
+GDSC$drugs %>% .[,1:5] %>% head
+
+### Drug names (features) are in rows and samples (cell lines) are in the
+### columns.
+
+### Number of features and samples:
+
+GDSC$drugs %>% dim() 
+
+### we have 11 drugs and 420 samples.
+
+### Check if any missing features for any samples:
+
+GDSC$drugs %>% anyNA()
+
+### there are missing features.
+
+### Check the number of NAs in each column:
+
+### I will apply the !is.na() %>% sum() functions to all the columns (samples)
+### to obtain the number of features which are of values for each sample.  
+
+apply(GDSC$drugs, MARGIN = 2, FUN = function(x) sum(!is.na(x))) %>% table
+
+### ### this code does the same: colSums(!is.na(GDSC$drugs)) %>% table()
+
+### We have 246 samples with a response value for all the drugs.118 patients do
+### not have any drug data.
+
+### We check the drug response distributions across the samples (cell
+### lines).
+
+GDSC$drugs[,1:200] %>% 
+boxplot(main="Drug response values distribution across
+the cell lines(samples)")
+
+### IMPORTANT NOTE:
+
+### we need do check the consistency between the sample columns of the GDSC
+### CNV and gene expression datasets and also their orders.
+
+GDSC$gex %>% dim()
+GDSC$cnv %>% dim()
+
+GDSC$drugs %>% dim()
+
+### Are all the cell lines covered in each datasets with same names:
+
+table(colnames(GDSC$gex)==colnames(GDSC$cnv))
+
+### they are same and in same order.
+
+### I will also check their sample names with the drug dataset.
+
+table(colnames(GDSC$drugs) == colnames(GDSC$cnv))
+
+### they are same so we have three datasets for same sample columns with same
+### sample names.
+
+
+
+### Not all patients have response data for all the drugs.
+### There are two options that we can proceed with:
+
+### We can subset the patient-drug dataframe only to patients that
+### have response variable for all the drugs:
+
+GDSC_drugs_all_11 <- GDSC$drugs %>% 
+  select(colnames(.)[colSums(!is.na(GDSC$drugs))==11])
+
+GDSC_drugs_all_11 %>% dim()
+### we have 246 patients with response data for all 11 drugs.
+
+### As a second option, I will omit the NA variables for each selected drug
+### within the function. Using this option, we can include all the patients
+### having a response variable for the selected drug so will not exclude any
+### available data.
+
+####
+
+### Exploration of GSI data will be done before the application of models
+### on them.
+
+gCSI<- dat$gCSI
+
+gCSI_test <- gCSI$test
+
+gCSI_test %>% summary
+
+gCSI_holdout <- gCSI$holdout
+
+gCSI_holdout %>% summary
+
+gCSI_drugs <- gCSI$drugs
+
+gCSI_drugs %>% .[,1:5] %>%  head
+
+
+
+```
+
+## Setting up the infrastructure
+
+While we build machine learning models, we often want to test many combinations of different ideas and settings. For instance, which omics layer performs as better predictors, which kind of data pre-processing steps yield better results, which kind of machine learning methods are stronger and more robust, so on and so forth. While doing this exercise, if you multiply the kinds of different decisions made at each step, you can easily reach 100s of different ideas tested. A lot of these things will be repetitive and can be simplified by writing functions that can be easily re-used for any combination we are testing.
+
+So, we first need to write some functions that we will use repeatedly. While writing these functions, you will need some actual data so that you can test if the functions work or not. However, while developing the functions, you don't need a very large dataset. You just need a dataset large enough to serve your purposes. This approach of simplifying your dataset by using a small proportion of the actual dataset helps you quickly test your functions and ideas.
+
+1.  **To prepare a data frame that is to be used for building drug response prediction models**
+
+`Input`: The function takes as input a matrix of "omics" measurements (samples on the row, features on the columns), a data.frame of drug response values (drugs.csv), and the name of the drug (e.g. 'Erlotinib') for which a model is going to be built.
+
+`Output`: The function should return two data frames: one for training and one for testing. Both data.frames should include the response variable "y", which represents the drug response measurements for the corresponding drug of interest.
+
+`Hint`: Not all samples are treated with all the drugs in `drugs.csv` file. So you will need to subset the data frames to only include samples without `NA`.
+
+```{r prepare}
+# M: omics data (features on the rows, samples on the columns)
+
+
+# drugs: table of drug response values (drugs on the rows, 
+#samples on the columns)
+
+# drugName: the name of the drug to set as the response variable 
+
+
+
+### A function to form a subset from the expression matrix, keeping
+### the top 1000 features with the highest variance across patients.
+
+subset_df <- function(mat_data){
+  
+  ### add also database filtering options.
+  
+  ### the function can be modified with both options: input <- c("L1000")  or     
+  ###c("TRUE")
+  
+  ### WARNING: I should filter the variables based on variance using only 
+  ### the training data. The filtering by variable features should be done
+  ### using only training samples.
+  
+  ### Otherwise, this leads to data leakage from test to training samples. 
+  ## So misleadingly, we will get higher performance from this.
+  
+  ### we will retrieve the indices of the columns ordered based on variances.
+  
+  top_1000 <- order(matrixStats::colVars(mat_data),decreasing = T)[1:1000]
+  mat_data <- mat_data[,top_1000]
+
+  return(mat_data)
+}
+
+### Our data preparation function:
+
+prepareDataForModeling <- function(M, drugs, drugName, top1000=NULL) {
+  
+  ### #L1000,msigdb can be added as pre-filtering option.
+  ### I added an additional input parameter which takes the logical arguement 
+  ### if we want to subset our gene expression matrix to top 1000 genes
+  ### with the highest variance across the patients.
+  
+
+   t_drugs <-t(drugs[row.names(drugs)==drugName,]) ### takes the row of the
+   ### specified drug and transpose it to a column.
+  
+  if (anyNA(t_drugs)) {
+     
+     t_drugs <-as.data.frame(na.omit(t_drugs))
+  }
+   
+   M <- M[row.names(t_drugs),] ### subset the exp df to the patients w/ drug
+   ### response.
+   
+   M <- cbind(t_drugs[match(row.names(M),row.names(t_drugs)),], M) 
+   ### match() function orders according to the left argument, so according
+   ### to the data frame which I will add new column with drug response
+   ### variables.
+
+  
+    ### please set the seed to 1234 here so that everyone gets the 
+    ###same train/test split 
+  
+   set.seed(1234) 
+
+    
+    intrain <- caret::createDataPartition(y = M[,1], p = 0.7)[[1]]
+
+
+  df.train <- M[intrain,]
+
+  df.test <- M[-intrain,]
+  
+  
+  ### If user wants to use only top 1000 highest variable genes 
+  ### test and train datasets for each drug will be different from
+  ### those of other drugs, since cell lines used for each drug differs
+  ### from the other drugs.
+
+  if (!is.null(top1000)){
+    
+    
+     top1000_train_names <-  colnames(subset_df(df.train[,-1])) ### -1 included
+     ### because first column includes the drug response values. Genes start 
+     ### from the second columns.
+ 
+
+      ### get logical indices for the 1000 gene columns starting from the
+      ### second column, since the first column contains the added drug 
+      ### response variables.
+      
+      top_1000_logical_indices <- colnames(df.train[,-1]) %in%
+                                                        top1000_train_names
+      
+      df.train <- df.train[, c(TRUE, top_1000_logical_indices)] ### I added 
+      ###TRUE to also include the drug column. 
+      
+      ### I check if df.train truely contains the data for the top1000 variant
+      ### gene:
+      
+      ### (df.train[,-1] %>% colnames()) %in% top1000_train_names 
+      
+      ### I also subset the test data for later use in the prediction part.
+      
+      df.test <- df.test[, c(TRUE, top_1000_logical_indices)]
+
+ }
+
+      ### I add the drug names to the first columns.
+
+      colnames(df.train)[1] <- drugName
+      
+      colnames(df.test)[1] <- drugName
+        
+
+      return(list('train' = df.train, 'test' = df.test)) 
+}
+
+```
+
+2.  (Optional) **To subset the input features**
+
+The gex/cnv data matrices contain measurements for all protein-coding genes (\~20,000 genes). Using all the features in the models will be computationally intensive. Moreover, most genes won't be informative at all. Most methods will struggle with the huge dimensionality of the feature matrices.
+
+So, filtering the features before using them in a model is advisable. However, this filtering strategy should not be informed by the data in "testing" or "holdout" samples. For instance, one way of filtering the features can be to pick top most variable genes in the training data. Another approach could be to use some prior knowledge such as collections of gene sets that are known to be important in cancer and/or overall drug response. Furthermore, these strategies can be combined with dimension reduction methods such as PCA. While running `caret::train` you can set the pre-processing options to 'pca' to use PCA as the pre-processing step.
+
+```{r}
+# Write a function that subsets a given data.frame
+# either using a statistic (e.g. most variable features) or a prior knowledge 
+# gene set (e.g. LINCS1000 genes)
+# You can also make this a part of `prepareDataForModelling` function
+
+
+subset_df <- function(mat_data){
+  
+  ### we will retrieve the indices of the columns ordered based on variances.
+  top_1000 <- order(matrixStats::colVars(mat_data),decreasing = T)[1:1000]
+  mat_data <- mat_data[,top_1000]
+
+  return(mat_data)
+}
+
+### NOTE: If I use subsetting in the training data, I will need to make the
+### prediction on the same genes in the test set.
+
+```
+
+3.  **To build drug response prediction models (given a training data frame prepared in 1&2) using `caret` library.**
+
+`Input`: This function should take a training data (including omics features and drug response values)
+
+`Output`: Return the model fit using methods such as "ranger", "glmnet", "svmLinear/svmRadial", or any other method of interest for which you have available libraries.
+
+`Hint`: You can write a single function that is flexible and can accommodate any method or argument that can be used in `caret`. You can also write multiple functions (i.e. one function per method where you hard-code method specific settings specifically for each method)
+
+```{r model}
+
+#### I can later use the expand.grid() function which creates a data.frame
+### from all combinations of the supplied vectors or factors. 
+
+#### random forest model with the default parameters.
+
+### t_control argument will take the train control parameters.
+### t_control <- caret::trainControl(method = "cv",number = 5)
+
+### Add option for elastic net, knn fit and ranger.
+
+fit_model <- function(train_data, t_control, tuneLength=NULL, tuneGrid_RF=NULL,
+                      tuneGrid_ENET=NULL, tuneGrid_KNN=NULL){
+
+  set.seed(1234)
+  
+  
+  
+  
+  ### I will try three methods for regression: random forest, kNN, and 
+  ### elastic net. Later, I can add try "svmLinear/svmRadial" method.
+  
+  ### we can supply the number to the tuneLength argument of the care::train
+  ### function. 
+  
+  ### If user supplies a tuneLength parameter, It will be used. If not,
+  ### Default parameter efined at the bottom will be used.
+  
+  ### The tuneLength parameter tells the algorithm to try different default 
+  ### values for the main parameter.
+  
+  ### If tuneGrid parameter is supplied by the user, It will be used.
+  ### Otherwise it will not be used.
+  
+  
+  ### TuneGrid argument takes a data.frame
+  ### contining specific arguements of each method selected in the
+  ### caret::train function.
+  
+  ### Default tuning parameters:
+  
+  tuneLength_used <- 10
+  
+  
+  if (!is.null(tuneLength)) {
+    
+      tuneLength_used <- tuneLength 
+      
+    }
+    
+  ### Reminder: Parameters for random forest are as follows:
+  
+  #### tuneGrid_RF = data.frame(mtry = 100,min.node.size = 1,
+  ##splitrule = c("variance"))
+
+   ### If tuneGrid_RF is not null, I will use the tuneGrid parameters 
+  ### provided by the user in the model function:
+  
+  
+  if (!is.null(tuneGrid_RF)) {
+    
+    m_fit_RF <- caret::train(x=train_data[,-1],y=train_data[,1],
+                                method="ranger",
+                                trControl=t_control,
+                                importance="impurity", # calculate importance
+                                tuneGrid = tuneGrid_RF)
+
+  } else { ### If not provided, I will continue with the tuneLenght parameter:
+    
+      
+  m_fit_RF <- caret::train(x=train_data[,-1], y=train_data[,1],
+                                method="ranger",
+                                trControl=t_control,
+                                importance="impurity", # calculate importance
+                                tuneLength=tuneLength_used)
+  
+  }
+
+  ### Reminder- Parameters for elastic Net is as following:
+  
+  ### tuneGrid_ENET = data.frame(alpha=0.5,lambda=seq(0.1,0.7,0.05))
+  # alpha and lambda parameters to try 
+  
+  
+  ### If tuneGrid_ENET is not null, I will use the tuneGrid parameters 
+  ### provided by the user in the model function:
+  
+  if (!is.null(tuneGrid_ENET)) {
+    
+     m_fit_enet <- caret::train(x=train_data[,-1],y=train_data[,1],
+                                method="glmnet",
+                                trControl=t_control,
+                                importance="impurity", # calculate importance
+                                tuneGrid = tuneGrid_ENET)
+
+  } else { ### If not provided, I will continue with the tuneLenght parameter:
+    
+      
+    m_fit_enet <- caret::train(x=train_data[,-1], y=train_data[,1],
+                                method="glmnet",
+                                trControl=t_control,
+                                importance="impurity", # calculate importance
+                                tuneLength=tuneLength_used)
+  
+  }
+
+  
+   ### Reminder- Parameters for knn are as following:
+  
+  ### tuneGrid_KNN = data.frame(k=2:7) # try k between 2-7
+
+  ### If tuneGrid_KNN is not null, I will use the tuneGrid parameters 
+  ### provided by the user in the model function:
+  
+  
+   if (!is.null(tuneGrid_KNN)) {
+    
+     m_fit_KNN <- caret::train(x=train_data[,-1],y=train_data[,1],
+                                method="knn",
+                                trControl=t_control,
+                                importance="impurity", # calculate importance
+                                tuneGrid = tuneGrid_KNN)
+
+  } else { ### If not provided, I will continue with the tuneLenght parameter:
+    
+      
+     m_fit_KNN <- caret::train(x=train_data[,-1],y=train_data[,1],
+                                method="knn",
+                                trControl=t_control,
+                                importance="impurity", # calculate importance
+                                tuneLength=tuneLength_used)
+  
+  }
+
+
+  
+  
+  ### One option is to add each by setting their names, separately.
+  
+  # model_outputs <- c()
+  
+  # model_outputs["RF"] <- m_fit_RF
+  # model_outputs["ENET"] <- m_fit_enet
+  # model_outputs["KNN"] <- m_fit_KNN
+  
+  ### other option:  
+  
+  model_outputs <- c()
+  
+  model_outputs <- c( model_outputs, list(RF = m_fit_RF, ENET = m_fit_enet, 
+                                                         KNN = m_fit_KNN))
+  return(model_outputs)
+  
+}
+
+```
+
+4.  **To evaluate the built models.**
+
+`Input`: A model built as in step 3 and a test dataset (as prepared in step 1&2 - or prepared using other means). The testing data frame must be a subset of the set of features used for training the input model and should contain a column that contains the drug response values (i.e. "y"), otherwise the model evaluation won't work.
+
+`Output`: Return a table of metrics such as `Rsquare` or `Correlation Coefficient`, which reflects how well the predicted drug response values using the input model match with the observed drug response values provided in the testing data frame.
+
+`Hint`: See `caret::COR` or `caret::R2`
+
+```{r evaluate}
+
+test_model <- function(model_fit, test_data){
+  
+  
+  
+  predict_data <- predict(object = model_fit, newdata=test_data[,-1])
+  ### 
+  
+  
+  return(caret::postResample(pred = predict_data, obs = test_data[,1]))
+
+}
+
+
+```
+
+5.  **To return a table of features sorted by importance**.
+
+The importance score of a feature reflects how much of the prediction accuracy is dependent on that feature for the specific prediction task. Most important features can be used as "biomarkers" of drug response.
+
+`Input`: A model built as in step 3.
+
+`Output`: A table of variable importance scores, where the features are on the rows and the column represents the variable importance. Optionally, the table could be sorted by importance scores, so the most important features appear on top.
+
+`Hint`: See `caret::varImp`
+
+```{r varimp}
+
+var_import <- function(model_fit){
+  
+  varImp_df <- caret::varImp(model_fit)
+  
+  ### ordering by importance scores:
+  
+  varImp_df <- varImp_df$importance[order(varImp_df$importance$Overall,
+  decreasing = TRUE),, drop=FALSE]
+  
+  return(varImp_df)
+  
+} 
+
+
+```
+
+## Within dataset prediction
+
+If you managed to write the four functions, now you should be ready to do some real data analysis.
+
+We start by doing a within-dataset analysis, where we build models on only `GDSC` dataset.
+
+Here is the pseudo-code of what you need to do:
+
+    # import data
+    Import the `gex.csv`, `cnv.csv`, and `drugs.csv` data from `GDSC`. 
+
+
+    # model
+    for each `drug` in `drugs.csv`
+      for each `omics` layer (gex.csv or cnv.csv)
+         - Prepare the data for modeling (as in Step 1 in above section)
+         split into 70% as training and 30% as testing data.
+         
+         for each `feature selection strategy` 
+         (e.g. take top most variable features, or use prior information (Cancer Hallmarks/LINCS1000 genes)
+           - preprocess the training data (subset the training data)
+         
+            for each `method` (ranger, glmnet, svmLinear, or ...)
+          
+                - build a model on training data (use 5-fold cross-validation)
+                - evaluate the model on testing data 
+                - compute variable importance metrics for the model 
+
+    # collate results
+    Finally, combine the results from this analysis in a table so that you can find the best combinations for each drug. 
+
+    # visualize results
+    Make plots to summarise the results by drug/omics type/procedure
+
+`Hint 1`: In order not to be overwhelmed by the for-loops, first pick one setup and make sure it works. For example, build a "glmnet" model for "Erlotinib" using "gex" features that overlap with LINCS1000 genes. Once you get this done, you can build the loops for other drugs, other omics layers, other feature subsetting operations.
+
+`Hint 2`: You can add more loops here. For example you can use different kinds of tuningGrid options, different kinds of feature preprocessing options (such as scale/center/nzv/PCA).
+
+`Hint 3`: See `expand.grid` function if you don't want to write too many nested loops
+
+`Hint 4`: Feel free to use multiple code chunks if it looks more organized
+
+```{r within_dataset}
+
+# import data:
+
+### Import the `gex.csv`, `cnv.csv`, and `drugs.csv` data from `GDSC`. 
+
+library(tidyverse)
+
+### setwd("./CAPSTONE_Some_Outputs")
+
+dat <- readRDS("../data.RDS")  ### Check the directory , it might be different.
+
+### reading gene expression matrix.
+
+gex <- dat$GDSC$gex
+
+### Form a transposed version:
+
+t_gexp <- t(gex) 
+
+t_gexp %>% head %>% .[1:5,1:5]
+
+### Same steps applied for the CNV data:
+
+cnv <- dat$GDSC$cnv
+
+t_cnv <- t(cnv)
+
+t_cnv %>% head %>% .[1:5,1:5]
+
+### read the patient x drug response data frame:
+
+GDSC_drugs <- dat$GDSC$drugs
+
+# model for each `drug` in `drugs.csv` for each `omics` layer (gex.csv or 
+### cnv.csv) 
+
+
+# -Prepare the data for modeling (as in Step 1 in above section) split into 
+### 70% #as training and 30% as testing data. for each `feature selection 
+###strategy` #(e.g. take top most variable features, or use prior information 
+###(Cancer #Hallmarks/LINCS1000 genes) 
+
+ my_prep_data_list_GEXP <- c()
+ 
+ my_prep_data_list_CNV <- c()
+
+ 
+for (i in c(1:nrow(GDSC_drugs))) { ### nrow(GDSC_drugs)
+
+  
+ ### WARNING: ALWAYS SET THE VARIABLES , DESIRED TO BE USED LATER, 
+ ### OUTSIDE THE FUNCTION!!!!! 
+  
+  
+ drug_name <- row.names(GDSC_drugs)[i]
+  
+ GEX_prep_data <- prepareDataForModeling(M = t_gexp, drugs = GDSC_drugs, 
+                          drugName = drug_name,top1000 = TRUE)
+ 
+ CNV_prep_data <-  prepareDataForModeling(M = t_cnv, drugs = GDSC_drugs, 
+                       drugName = drug_name, top1000 = TRUE)
+ 
+ ### we will add each drug name to its train and test sets' names: 
+ 
+
+ 
+  names(GEX_prep_data) <- paste0(paste0(drug_name,"_"),names(GEX_prep_data))
+ 
+  names(CNV_prep_data) <- paste0(paste0(drug_name,"_"),names(CNV_prep_data))
+ 
+    
+  my_prep_data_list_GEXP <- c(my_prep_data_list_GEXP, GEX_prep_data)
+ 
+  my_prep_data_list_CNV <- c(my_prep_data_list_CNV, CNV_prep_data)
+ 
+}
+
+
+# - preprocess the training data (subset the training data) for each `method` 
+ #(ranger, glmnet, svmLinear, or ...) - build a model on training data 
+ #(use #5-fold cross-validation) 
+
+t_control <- caret::trainControl(method = "cv",number = 2) ### I WILL CHANGE:
+
+
+ my_model_list_GEXP <- c()
+ 
+ my_model_list_CNV <- c()
+
+ i <- 1  ### I will take only the training sets for each drug which are stored 
+ #in the odd numbers (i.e. 1,3,5.....21).
+ 
+while(i <= length(my_prep_data_list_CNV))  { 
+  
+  
+  ###length(my_prep_data_list_CNV) both CNV and GEXP lists are of same length 
+  ### so we #can iterate up to the length of either.
+  
+  mod_fit_gexp <- fit_model(train_data = my_prep_data_list_GEXP[[i]],
+                            t_control = t_control) 
+  
+  mod_fit_CNV <- fit_model(train_data = my_prep_data_list_CNV[[i]],
+                            t_control = t_control) 
+   
+ 
+  
+### WARNING: Double brackets were used to access the first element of the     
+###list which contains our train dataset which is classed as ("matrix" "array").
+  
+  my_model_list_GEXP[[names(my_prep_data_list_GEXP[i])]] <- mod_fit_gexp
+  
+  my_model_list_CNV[[names(my_prep_data_list_CNV[i])]] <- mod_fit_CNV
+  
+### we add the model for each drug to the list by assigning its name at the 
+#left.
+  
+### single bracket was used to access the name of the list that contains the 
+#training matrix as its only element.
+
+  i <- i+2
+}
+
+    
+# - evaluate the model on testing data 
+
+ ### I will read the previously formed model objects for each type of features:
+ 
+ # my_model_list_GEXP <- readRDS("GEXP_models") 
+ # 
+ # my_model_list_CNV <- readRDS("CNV_models")
+ # 
+ metrics_gexp <- c()
+ 
+ metrics_CNV <- c()
+ 
+for (i in 1:length(my_model_list_GEXP)) {
+  
+     
+ ### I create names for each metric that contains the drug name and the data 
+  #type. Each model is named as  " 'drug name'_train " e.g. "Crizotinib_train". 
+  #I take only the part of the name before the "_" character. It is the first 
+  #element of the out put vector with two elements, from strsplit() function.
+  
+  ### Next I add "_gexp" and "_CNV" ,respectively, to the each metric element.
+     
+     name_gexp <- paste0( unlist(strsplit(names(my_model_list_GEXP[i]),
+                                          split = "_"))[1])
+     
+     
+      ### same for CNV test data for each drug:
+      
+      ### Actually, CNV test names are same with GEXP test names but I will 
+      ### form #new variable to avoid confusion. 
+      
+     name_CNV <-  paste0( unlist(strsplit(names(my_model_list_CNV[i]),
+                                          split = "_"))[1]) 
+   
+     
+
+     
+     ### Apply the test_model function to the test data to calculate the RMSE 
+     #and R2 metrics and add them to the list object as a named variable:
+     
+     
+      ### get the name of the test variable to supply as parameter to the 
+     #test_data argument: 
+     
+      test_gexp <-
+          names(my_prep_data_list_GEXP)[grepl(x=names(my_prep_data_list_GEXP), 
+                                                         pattern = "test")][i]
+
+      test_CNV <-
+          names(my_prep_data_list_CNV)[grepl(x= names(my_prep_data_list_CNV), 
+                                                         pattern = "test")][i] 
+      ### Apply the test_model function:
+      
+
+      for (k in c(1:length(my_model_list_GEXP [[i]]))) { 
+        ### number of methods use i.e. 3 (KNN,RF,ENET).
+        
+        ### I will form names for the 3 different model objects iteratively,
+        ### I will add the calculated prediction errors for each model for each
+        ### drug.
+        
+        name_model_gexp <- names(my_model_list_GEXP [[i]][k])
+        
+        metrics_gexp[[name_gexp]][[ name_model_gexp ]] <-   
+                        test_model(model_fit=my_model_list_GEXP[[i]][[k]],
+                              test_data = my_prep_data_list_GEXP[[test_gexp]])
+        
+        
+        name_model_CNV <- names(my_model_list_CNV [[i]][k])
+        
+        metrics_CNV[[name_CNV]][[name_model_CNV]] <- 
+                        test_model(model_fit = my_model_list_CNV[[i]][[k]],
+                              test_data = my_prep_data_list_CNV[[test_CNV]])
+        
+        
+      }
+
+     
+}
+ 
+
+
+ # - compute variable importance metrics for the model # collate 
+ # results. Finally, combine the results from this analysis in a table so that 
+ # you can find the best combinations for each drug. 
+
+ 
+var_imp_gexp <- c()
+
+var_imp_cnv <- c()
+
+
+for (i in 1:length(my_model_list_CNV)) {
+  
+  
+  ### assigning names to each variable importance data frame:
+  
+   name_gexp <- paste0( unlist(strsplit(names(my_model_list_GEXP[i]),
+                                  split = "_"))[1])
+  
+   name_CNV <-  paste0( unlist(strsplit(names(my_model_list_CNV[i]),
+                                  split = "_"))[1]) 
+   
+   
+  ### Form important variables data frames:
+   
+  
+  ### For gexp models:
+   
+   
+   for (k in 1:length(my_model_list_GEXP[[i]])) {
+     
+  
+     name_model_gexp <- names(my_model_list_GEXP[[i]][k])
+     
+     name_model_CNV <- names(my_model_list_CNV[[i]][k])
+     
+     
+  var_imp_gexp[[ name_gexp ]][[ name_model_gexp ]] <- 
+                    var_import(model_fit = my_model_list_GEXP[[i]][[k]])
+ 
+   ### For cnv models:
+  
+  var_imp_cnv[[ name_CNV ]][[name_model_CNV ]] <- 
+                    var_import(model_fit = my_model_list_CNV[[i]][[k]])
+
+   }
+    
+}
+
+
+### Plot the model tuning parameters by using plot function:
+
+### we can supply any model object of caret train class as an argument:
+
+
+
+for (i in 1:length(my_model_list_GEXP)) {
+  
+  for (k in 1:length(my_model_list_GEXP[[i]])) {
+     
+    
+    
+    name_image <- paste0(strsplit(x = names((my_model_list_GEXP[i])),
+                               split = "_")[[1]][1],"_GEXP",
+                                    " with ",names(my_model_list_GEXP[[i]][k]))
+     # 1. Open png file
+      png(paste0(getwd(),"/plots/",name_image,".png"))
+      
+      # 2. Create the plot
+    
+         p <- plot(my_model_list_GEXP[[i]][[k]],
+                          main=name_image)
+
+         print(p) 
+          
+          
+            # 3. Close the file
+      dev.off()
+  
+  }
+
+  for (k in 1:length(my_model_list_CNV[[i]])) {
+    
+    
+
+    
+      name_image <- paste0(strsplit(x = names((my_model_list_CNV[i])),
+                                split = "_")[[1]][1],"_CNV",
+                                    " with ",names(my_model_list_CNV[[i]][k]))    
+
+       # 1. Open png file
+       png(paste0(getwd(),"/plots/",name_image,".png"))
+      
+      # 2. Create the plot
+
+     p <- plot(my_model_list_CNV[[i]][[k]],
+              main=name_image)
+
+        print(p) 
+            
+       
+      # 3. Close the file
+      dev.off()
+  
+  }
+  
+  
+}
+
+ 
+### I will write a function to form a summary tibble from the metrics of 
+#each model.
+
+### for each drug, get best model out of three method: select by RMSE values.
+
+### RMSE <- c(values for each drug) ### best tune from caret model objects.
+
+      ### Compare the RMSE values and get the minimum
+                                ### out of three methods.
+
+      ### best_models_for_each_drug <- c(best_models) ### besttune from model 
+                                                                    ###objects.
+
+### preprocessing_used <- c("top1000 variables")
+
+
+### Same for the models build by CNV data.
+
+
+
+
+all_drugs <- GDSC_drugs %>% row.names()
+
+best_model <- c()
+
+min_RMSE <- c()
+
+
+
+for (drug in all_drugs) {
+
+  ###  NOTE: metrics_CNV[[1]]$RF[1] can be used to directly access RF method
+  ### RMSE value for the first drug. $ operator should be used more for the
+  ### sake of easy readability.
+  
+  best <-  metrics_gexp %>% as.data.frame() %>% select(starts_with(drug)) %>%
+                                       t() %>% as.data.frame() %>% select(RMSE)
+  
+  ### alternative: 
+  ###best <- metrics_gexp[drug][[1]] %>% as.data.frame() %>% t %>% 
+                                            ###as.data.frame() %>% select(RMSE)
+  
+  name_of_best_model <- row.names(best)[which.min(best[,1])]
+  ### get rid of the dot (.) and the drug name:
+  
+  name_of_best_model <- strsplit(name_of_best_model, split = ".",
+                                                            fixed = T)[[1]][2]
+  ### When using regex, we need to set the fixed = TRUE in order to escape 
+  ### the dot.
+   
+  min_RMSE <- c(min_RMSE, min(best[,1]))
+  
+  best_model <- c(best_model, name_of_best_model)
+}
+
+
+summary_DF <- tibble(drugs=all_drugs, RMSE=min_RMSE, model=best_model)
+
+summary_DF %>% kableExtra::kbl(caption = "BEST MODELS - GEXP") %>% kableExtra::kable_classic(full_width = F, html_font = "Cambria",
+font_size = 20) %>% 
+  kableExtra::save_kable(file = paste0("BEST_MODELS_GEXP",".png"))   
+
+
+
+best_model_CNV <- c()
+
+min_RMSE_CNV <- c()
+
+
+
+for (drug in all_drugs) {
+
+  
+  
+  best <-  metrics_CNV %>% as.data.frame() %>% select(starts_with(drug)) %>% 
+    t() %>% as.data.frame() %>% select(RMSE)
+  
+  ### alternative: 
+  ### best <- metrics_CNV[drug][[1]] %>% as.data.frame() %>% t %>% 
+                                          ###as.data.frame() %>% select(RMSE)
+  
+  min_RMSE_CNV <- c(min_RMSE_CNV, min(best[,1]))
+  
+  name_of_best_model <- row.names(best)[which.min(best[,1])]
+  ### get rid of the dot (.) and the drug name:
+  
+  name_of_best_model <- strsplit(name_of_best_model, split = ".",
+                                                            fixed = T)[[1]][2]
+  ### When using regex, we need to set the fixed = TRUE in order to escape 
+  ### the dot.
+  
+  best_model_CNV <- c(best_model_CNV, name_of_best_model)
+}
+
+
+summary_DF_CNV <- tibble(drugs=all_drugs, RMSE=min_RMSE_CNV, 
+                                                      model=best_model_CNV)
+
+summary_DF_CNV %>% kableExtra::kbl(caption = "BEST MODELS - CNV") %>% kableExtra::kable_classic(full_width = F,html_font = "Cambria", 
+font_size = 20) %>% 
+  kableExtra::save_kable(file = paste0("BEST_MODELS_CNV",".png"))   
+
+
+
+print(summary_DF)
+
+print(summary_DF_CNV)
+
+
+
+
+
+
+# visualize results Make plots to summarize the results by drug/omics 
+#type/procedure 
+
+### top 10 important variables plot for each drug and omics type will
+### be plotted.
+
+
+
+# ``` `Hint 1`: In order not to be overwhelmed by the for-loops, first pick one 
+#setup and make sure it works. For example, build a "glmnet" model for
+#"Erlotinib" using "gex" features that overlap with LINCS1000 genes. Once you
+#get this done, you can build the loops for other drugs, other omics layers, 
+#other feature subsetting operations. 
+
+#`Hint 2`: You can add more loops here. For example you can use different kinds 
+#of tuningGrid options, different kinds of feature preprocessing options (such 
+#as scale/center/nzv/PCA). 
+
+# `Hint 3`: See `expand.grid` function if you don't want to write too many 
+#nested loops 
+
+
+# `Hint 4`: Feel free to use multiple code chunks if it looks more organized
+
+```
+
+## Cross-dataset prediction
+
+Now, we would like to also predict drug response values in an external dataset. Validating your findings in an external dataset gives more reliability to your analysis. Therefore, we provide a dataset with matching features, omics layers, and drug response values (gCSI dataset).
+
+For this exercise, we will re-use the models that we built during the `within-dataset prediction` exercise. We use `gCSI/test` data to pick the best model and use the best model to evaluate on the `gCSI/holdout` data.
+
+Here is what we'd like to do:
+
+    Import the "test" portion of the gCSI dataset (`data/gCSI/test`) 
+    Import the "holdout" portion of the gCSI dataset (`data/gCSI/holdout`)
+    1. For each model built for GDSC dataset in **within-dataset prediction** exercise
+        Evaluate the model on `gCSI/test` data (for corresponding omics/drug combination)
+    2. Pick the best approach for each drug from step 1. Evaluate it on `gCSI/holdout` data (for corresponding omics/drug combination) (Assuming you have saved the model corresponding to each experiment).
+    3. Collate and visualize the results 
+
+```{r cross-dataset-test}
+
+### We form the objects containing the test and holdout datasets and the drugs 
+#data.
+
+gCSI <- dat$gCSI
+
+gCSI_test <- gCSI$test
+
+gCSI_holdout <- gCSI$holdout
+
+gCSI_drugs <- gCSI$drugs
+
+
+### 1. For each model built for GDSC dataset in **within-dataset prediction** 
+#exercise, Evaluate the model on `gCSI/test` data (for corresponding omics/drug
+#combination)
+
+### we get expression and CNV data for the test group:
+
+gCSI_test_gex <- gCSI_test$gex
+
+gCSI_test_cnv <- gCSI_test$cnv
+
+### transpose them:
+
+
+t_gexp_gCSI <- t(gCSI_test_gex)
+
+t_CNV_gCSI <- t(gCSI_test_cnv)
+
+
+### I check the number of features in the gCSI dataset to see whether they are 
+#same with the GDSC datasets:
+
+### gCSI dataset dimensions:
+  
+t_gexp_gCSI  %>% dim()
+
+t_CNV_gCSI  %>% dim()
+
+### GDSC dataset dimensions:
+
+t_gexp %>% dim()
+
+t_cnv %>% dim()
+
+###########################
+
+### Check the dimension of the gCSI drug data frame:
+
+gCSI_drugs %>% dim()
+
+### we have 310 patients and 11 drugs.
+
+### 150 of 310 patients are hosted in the gCSI test group.
+
+### 160 of 310 patients are hosted in the gCSI holdout group.
+
+### Prepare the gCSI data to be used with the models:
+
+### we get the names of the top 1000 genes used in modelling previously in the 
+#GDSC dataset:
+
+### NOTE: FOR ALL DRUGS WE HAVE DIFFERENT TOP 1000 GENES, SO WE NEED A LOOP
+### TO TAKE ALL OF THEM FOR EACH DRUG.
+
+top_1000_genes_GEXP <- c()
+
+all_drugs <- row.names(GDSC_drugs)
+
+i <- 1
+
+while (i <= length(my_prep_data_list_GEXP)) {
+  
+  ### Following code will take the gene names from the train data of each drug.
+  
+  top_1000_genes_GEXP <- c(top_1000_genes_GEXP, 
+                           list(colnames(my_prep_data_list_GEXP[[i]])[-1]) )
+  
+  i <- i+2
+}
+
+### Adding the names of each drug to their respective top 1000 gene vectors.
+
+names(top_1000_genes_GEXP) <- all_drugs
+
+### get the top 1000 gene for each drug from the CNV train data:
+
+top_1000_genes_CNV <- c()
+
+i <- 1
+
+while (i <= length(my_prep_data_list_CNV)) {
+  
+  
+  
+  
+  top_1000_genes_CNV <- c(top_1000_genes_CNV, 
+                           list(colnames(my_prep_data_list_CNV[[i]])[-1]) )
+  
+  i <- i+2
+}
+
+names(top_1000_genes_CNV) <- all_drugs
+
+#########################
+
+
+### I need to subset also the gCSI drug data frame since it contains the
+###cell lines from the both test and the holdout groups. I will subset it 
+###to the cell lines who are used in the gCSI test set.
+
+gCSI_drugs_test <- gCSI_drugs[,row.names(t_gexp_gCSI)]
+
+### NOTE: Both CNV and gCSI test and holdout data frames have same samples ,
+### respectively.
+
+### I will write a function to prepare the gCSI test data:
+
+prepare_data_for_GCSI <- function(M, drugs, drugName, top1000 = NULL, 
+                                  GEXP = NULL, CNV = NULL ) {
+
+   t_drugs <-t(drugs[row.names(drugs)==drugName,]) ### takes the row of the 
+   #specified drug and transpose it to a column.
+  
+  if (anyNA(t_drugs)) {
+     
+     t_drugs <-as.data.frame(na.omit(t_drugs))
+  }
+   
+   M <- M[row.names(t_drugs),] ### subset the exp df to the patients w/ drug
+   ### response.
+   
+   M <- cbind(t_drugs[match(row.names(M),row.names(t_drugs)),], M) ### match() 
+   #functions order according to the left argument.
+
+  
+   
+  
+   if (!is.null(top1000)) { ### If user sets top1000 argument TRUE: 
+     
+     if (!is.null(GEXP)) {  ### If it is GEXP data:
+       
+        used_genes_GEXP <- top_1000_genes_GEXP[[drugName]] ### use GEXP top1000.
+     
+     M <- M[,c(1, which(colnames(M) %in% used_genes_GEXP))] ### 1 is to select
+     ### first column with the drug data. 
+       
+     }
+     
+     if (!is.null(CNV)) {### If it is CNV data:
+       
+       
+     used_genes_CNV <- top_1000_genes_CNV[[drugName]]   ### use CNV top1000.
+      
+     M <- M[,c(1, which(colnames(M) %in% used_genes_CNV))] ### 1 is to select
+     ### first column with the drug data. 
+       
+     }
+     
+    
+   }
+   
+
+    
+      
+     
+   
+   colnames(M)[1] <- drugName ### add the name of the drug to the first column 
+   #including drug response values for each patient.
+   
+   return(M)
+    
+}
+
+
+#  my_gCSI_data_list_CNV[[2]] %>% dim()
+# [1] 145 816
+
+ my_gCSI_data_list_gexp <- c()
+ my_gCSI_data_list_CNV <- c()
+ 
+for (i in 1:nrow( gCSI_drugs_test)) {
+  
+ GEX_prep_gCSI <- prepare_data_for_GCSI(M = t_gexp_gCSI, 
+            drugs = gCSI_drugs_test, drugName = row.names(gCSI_drugs_test)[i],
+            top1000 = TRUE,GEXP = TRUE)
+ 
+ CNV_prep_gCSI <-  prepare_data_for_GCSI(M = t_CNV_gCSI, 
+            drugs = gCSI_drugs_test, drugName = row.names(gCSI_drugs_test)[i],
+            top1000 = TRUE, CNV = TRUE)
+ 
+ 
+ name_gexp_gCSI <- paste0(row.names(gCSI_drugs_test)[i],"_gCSI","_test","_gexp")
+ 
+ my_gCSI_data_list_gexp[[name_gexp_gCSI ]] <- GEX_prep_gCSI
+ 
+ name_CNV_gCSI <- paste0(row.names(gCSI_drugs_test )[i],"_gCSI","_test","_CNV")
+ 
+ my_gCSI_data_list_CNV[[name_CNV_gCSI ]] <- CNV_prep_gCSI
+ 
+}
+
+### I check the dimensions :
+
+ # sapply(my_gCSI_data_list_gexp, dim)
+ # sapply(my_gCSI_data_list_CNV, dim)
+
+ 
+ 
+ 
+###  Evaluation of the models on `gCSI/test` data (for corresponding omics/drug 
+ ### combination)
+
+ metrics_gCSI_test_gexp <- c()
+ 
+ metrics_gCSI_test_CNV <- c()
+ 
+for (i in c(1:length(my_model_list_GEXP))) { ### 
+  
+for (model_type in names(my_model_list_GEXP[[1]]) ) { ### take the name of
+  ### each of three models one by one and add the metrics by their names to the
+  ### output list. Each element has the same number of model types. So I set
+  ### only 1.
+  
+
+metrics_gCSI_test_gexp[[names(my_gCSI_data_list_gexp[i])]][[ model_type ]] <- 
+  test_model(model_fit = my_model_list_GEXP[[i]][[ model_type ]],
+             test_data = my_gCSI_data_list_gexp[[i]]) 
+  
+  
+metrics_gCSI_test_CNV[[names(my_gCSI_data_list_CNV[i])]][[ model_type ]] <- 
+  test_model(model_fit = my_model_list_CNV[[i]][[ model_type ]],
+             test_data = my_gCSI_data_list_CNV[[i]]) 
+
+  }
+  
+}
+
+
+### 2. Pick the best approach for each drug from step 1. Evaluate it on `
+###gCSI/holdout` data (for corresponding omics/drug combination) (Assuming you
+### have saved the model corresponding to each experiment). 
+ 
+ 
+
+### Best method by the lowest RMSE for each drug:
+ 
+### GEXP:
+ 
+ 
+ best_model_GCSI_GEXP <- c() ### Best method for each drug will be stored.
+ 
+ best_model_GCSI_CNV <- c() ### same for the CNV data.
+ 
+ min_RMSE_gcsi_gexp <- c()   ### The RMESE value for the best method for each
+ ####drug will be stored.
+ 
+ min_RMSE_gcs_cnv <- c()   ### same for the CNV data.
+ 
+for (i in c(1:length(all_drugs))) { ### For all 11 drugs:
+  
+
+### I convert current drug's list into a data.frame. In this data.frame,
+### first row contains RMSE values for each method in the respective columns.
+### I retrieve the minimum of them and add to the vector.
+  
+    
+min_RMSE_gcsi_gexp <- c(min_RMSE_gcsi_gexp, (metrics_gCSI_test_gexp[[i]] %>%
+                                      as.data.frame() %>% .[1,] %>% min))
+ 
+
+### I do the same above but this time I retrieve the position of the smallest
+### RMASE value in the data frame by which.min function, which gives the 
+### position as a named integer vector. I then take its name and add the 
+### vector. Thereby, I acquired the name of the regressor method with the
+### minimum error.
+
+
+best_model_GCSI_GEXP  <- c(best_model_GCSI_GEXP,(metrics_gCSI_test_gexp[[i]] %>% 
+                        as.data.frame() %>% .[1,] %>% which.min() %>% names))
+
+### Get the min RMSE value for CNV data:
+    
+min_RMSE_gcs_cnv <- c(min_RMSE_gcs_cnv, (metrics_gCSI_test_CNV[[i]] %>%
+                                      as.data.frame() %>% .[1,] %>% min)) 
+
+
+### Get the best method:
+
+best_model_GCSI_CNV <- c(best_model_GCSI_CNV,(metrics_gCSI_test_CNV[[i]] %>% 
+                        as.data.frame() %>% .[1,] %>% which.min() %>% names))
+   
+ }
+ 
+ ### Make summary tables:
+ 
+summary_DF_GCSI_GEXP <- tibble(drugs=all_drugs, RMSE=min_RMSE_gcsi_gexp, 
+                                                  model=best_model_GCSI_GEXP)
+
+print(summary_DF_GCSI_GEXP)
+
+summary_DF_GCSI_GEXP %>% kableExtra::kbl(caption = "BEST-MODELS-GCSI-GEXP") %>% kableExtra::kable_classic(full_width = F,html_font = "Cambria", 
+font_size = 20) %>% 
+  kableExtra::save_kable(file = paste0("BEST_MODELS_GCSI_GEXP",".png"))   
+
+
+ 
+summary_DF_GCSI_CNV <- tibble(drugs=all_drugs, RMSE=min_RMSE_gcs_cnv, 
+                                                  model=best_model_GCSI_CNV)
+
+print(summary_DF_GCSI_CNV)
+
+summary_DF_GCSI_CNV %>% kableExtra::kbl(caption = "BEST-MODELS-GCSI-CNV") %>% kableExtra::kable_classic(full_width = F,html_font = "Cambria", 
+font_size = 20) %>% 
+  kableExtra::save_kable(file = paste0("BEST_MODELS_GCSI_CNV",".png"))   
+
+
+### I will apply the best models for each drug on the GCSI holdout datasets:
+ 
+ 
+### Prepare the data of the holdout group:
+ 
+gCSI_holdout_gex <- gCSI_holdout$gex
+
+gCSI_holdout_cnv <- gCSI_holdout$cnv
+
+
+### transpose them:
+
+
+t_gCSI_holdout_gex <- t(gCSI_holdout_gex)
+
+t_gCSI_holdout_cnv  <- t(gCSI_holdout_cnv)
+
+
+### I check the number of features in the gCSI dataset to see whether they are 
+### same with the GDSC datasets:
+
+### gCSI holdout dataset dimensions:
+  
+t_gCSI_holdout_gex  %>% dim()
+
+t_gCSI_holdout_cnv  %>% dim()
+
+
+### I need to subset also the gCSI drug data frame since it contains the
+###patients from the both test and the holdout groups. I will subset 
+### it to the patients who are used in the gCSI test set.
+
+gCSI_drugs_holdout <- gCSI_drugs[,row.names(t_gCSI_holdout_gex)]
+ 
+
+### prepare the data before the evaluation of the model:
+
+### Firstly, I will need to subset the data to the used 1000 genes.
+
+###
+
+ my_gCSI_HOLDOUT_list_gexp <- c() ### I will store the subset of datasets 
+                                  ### in these empty vectors.
+ 
+ my_gCSI_HOLDOUT_list_CNV <- c()
+ 
+
+ 
+for (i in 1:nrow( gCSI_drugs_holdout )) {
+ 
+ ### the following function subsets the dataset for each drug by using the
+ ### previously created 1000 highest variable genes used for each drug in
+ ### the generation of each model. We do this because test datasets should
+ ### have same features with the train data used in the modelling process.
+   
+ GEX_prep_gCSI_H <- prepare_data_for_GCSI(M = t_gCSI_holdout_gex, 
+            drugs = gCSI_drugs_holdout, 
+            drugName = row.names(gCSI_drugs_holdout)[i],
+            top1000 = TRUE,GEXP = TRUE)
+ 
+ CNV_prep_gCSI_H <-  prepare_data_for_GCSI(M = t_gCSI_holdout_cnv, 
+            drugs = gCSI_drugs_holdout, 
+            drugName = row.names(gCSI_drugs_holdout)[i],
+            top1000 = TRUE, CNV = TRUE)
+ 
+ 
+ name_gexp_gCSI_H <- row.names(gCSI_drugs_holdout)[i]
+ 
+ my_gCSI_HOLDOUT_list_gexp[[ name_gexp_gCSI_H ]] <- GEX_prep_gCSI_H
+ 
+ name_CNV_gCSI_H <- row.names(gCSI_drugs_holdout)[i]
+ 
+ my_gCSI_HOLDOUT_list_CNV[[ name_CNV_gCSI_H ]] <-  CNV_prep_gCSI_H
+ 
+}
+
+### I check the dimensions :
+
+ #sapply( my_gCSI_HOLDOUT_list_CNV, dim)
+ #sapply( my_gCSI_HOLDOUT_list_gexp, dim)
+
+ 
+
+ ###Evaluation of the models on `gCSI/test` data (for corresponding omics/drug
+ ###combination)
+ 
+
+### I will need to use the best models for each drug in the model fitting
+### function.
+
+
+### I will change the names of the lists that contain the model objects 
+### for each drug, from "Crizotinib_train" to "Crizotinib" etc. 
+### So, I can easily access by drug names.
+
+names(my_model_list_GEXP) <- all_drugs
+names(my_model_list_CNV) <- all_drugs
+
+ 
+best_model_GCSI_GEXP %>% print()  ### contains the best models for each drug. 
+best_model_GCSI_CNV %>% print()   ### contains the best models for each drug.
+
+ 
+### I will also add the drug names to each element corresponding to the
+### respective drugs to be able to access by supplying drug names.
+
+names(best_model_GCSI_GEXP) <- all_drugs
+names(best_model_GCSI_CNV) <- all_drugs
+
+best_gex <- best_model_GCSI_GEXP
+best_cnv <- best_model_GCSI_CNV
+
+metrics_HOLDOUT_gexp <- c()
+metrics_HOLDOUT_CNV <- c()
+ 
+
+for (drug in all_drugs) { ### 
+  
+
+    metrics_HOLDOUT_gexp[[drug]] <- 
+        test_model(model_fit = my_model_list_GEXP[[drug]][[best_gex[drug]]],
+                                  test_data = my_gCSI_HOLDOUT_list_gexp[[drug]])
+  
+    metrics_HOLDOUT_CNV[[drug]] <- 
+        test_model(model_fit = my_model_list_CNV[[drug]][[best_cnv[drug]]],
+                                test_data = my_gCSI_HOLDOUT_list_CNV[[drug]])
+  
+}
+
+### I will retrieve the RMSE values into a vector for both GEXP and CNV:
+
+RMSE_gexp <- c()
+RMSE_CNV <- c()
+
+for (drug in all_drugs) {
+  
+RMSE_gexp <- c(RMSE_gexp, metrics_HOLDOUT_gexp[[drug]][[1]])
+
+RMSE_CNV <- c(RMSE_CNV, metrics_HOLDOUT_CNV[[drug]][[1]])   
+  
+}
+
+
+summary_tibble_HOLDOUT_gexp <- tibble("DRUGS"=all_drugs, 
+                                         "RMSE"= RMSE_gexp,"method"=best_gex)
+
+summary_tibble_HOLDOUT_CNV <- tibble("DRUGS"=all_drugs,
+                                         "RMSE"= RMSE_CNV, "method"=best_cnv)
+
+```
+
+```{r cross-dataset-holdout}
+
+```
+
+# Final Results
+
+For both within-dataset and cross-dataset exercises, report the `Correlation Coefficient` of the predicted vs observed drug response values.
+
+```{r collate_final_results}
+# summary results for each drug from within-dataset-prediction (GDSC->test )
+
+### I print the tables for the previously generated summary tibbles:
+
+summary_DF_GCSI_GEXP %>% kableExtra::kbl(caption = "GEXP_GDSC_TEST_METRICS") %>% kableExtra::kable_classic(full_width = F,html_font = "Cambria", 
+font_size = 20) %>% kableExtra::save_kable(file = paste0("./SUMMARY_OF_THE_RESULTS/SUMMARY_GDSC_TEST_GEXP",".png")) 
+
+
+summary_DF_GCSI_CNV %>% kableExtra::kbl(caption = "CNV_GDSC_TEST_METRICS") %>% kableExtra::kable_classic(full_width = F,html_font = "Cambria", 
+font_size = 20) %>% kableExtra::save_kable(file = paste0("./SUMMARY_OF_THE_RESULTS/SUMMARY_GDSC_TEST_CNV",".png")) 
+
+
+
+# summary results for each drug from cross-dataset-prediction (gCSI -> holdout)
+
+summary_tibble_HOLDOUT_gexp %>% kableExtra::kbl(caption = "GEXP_gCSI_HOLDOUT_METRICS") %>% kableExtra::kable_classic(full_width = F,html_font = "Cambria", font_size = 20) %>% 
+kableExtra::save_kable(file = paste0("./SUMMARY_OF_THE_RESULTS/SUMMARY_GEXP_gCSI_HOLDOUT",".png")) 
+
+
+summary_tibble_HOLDOUT_CNV %>% kableExtra::kbl(caption = "CNV_gCSI_HOLDOUT_METRICS") %>% kableExtra::kable_classic(full_width = F,html_font = "Cambria", 
+font_size = 20) %>% kableExtra::save_kable(file = paste0("./SUMMARY_OF_THE_RESULTS/SUMMARY_CNV_gCSI_HOLDOUT",".png")) 
+
+
+
+### correlation coefficients can also be printed as an alternative.
+
+sessionInfo()
+
+```
